@@ -1,7 +1,9 @@
-.PHONY: build, run
+GC=gcc
+WARNINGS=-Wall -Wextra
+STANDARD=-std=c2x
+
 
 build:
-	gcc -std=c2x -Wall -Wextra -pedantic main.c -o a.out
-
+	 $(GC) $(STANDARD) $(WARNINGS) main.c -o a.out
 run:
-	./a.out
+	 ./a.out

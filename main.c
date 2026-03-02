@@ -1,75 +1,98 @@
-#include <netinet/in.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include <arpa/inet.h>
+#include <string.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <time.h>
 #include <unistd.h>
-#include <string.h>
+#include "lib/map.h"
 
-#define PORT 9999
+#define PORT 9990
+#define BACKLOG 100
 #define BUFFER_SIZE 1024
+hashmap * route_file;
 
-bool run_server = true;
+typedef struct{
+    char filename[256];
+    int client_fd;
+    char method[10];
+    char route[255] ;
+    char version[16];
+}ThreadData;
 
-void send_HTML(int *sock, const char *file) {
-    printf("parsed route %s\n", file);
-    FILE *html = fopen(file, "rb");
+
+void * handle_client_old(int * client_fd, const char *filename) {
+    // int *client_fd = (int *)arg;
+    // printf("serving file %s\n", filename);
+    FILE *html = fopen(filename, "r");
     if(html == NULL) {
-        perror("FAILED TO OPEN FILE");
-        return;
+        perror("could not open file");
+        return NULL;
     }
-    
-    char buffer[BUFFER_SIZE] = {0};
+    char read_buffer[BUFFER_SIZE] = {0};
     size_t read_size = 0;
     char *header =  "HTTP/1.1 200 OK\r\n"
            "Content-Type: text/html\r\n"
            "Connection: close\r\n"
            "\r\n";
     
-    send(*sock, header, strlen(header), 0);
-    while ((read_size = fread(buffer, 1, BUFFER_SIZE, html)) > 0) {
-        send(*sock, buffer, read_size, 0);
+    send(*client_fd, header, strlen(header), 0);
+    
+    while ((read_size = fread(read_buffer, 1, BUFFER_SIZE, html)) > 0) {
+        send(*client_fd, read_buffer, read_size, 0);
     }
-    fclose(html);
-
+    return NULL;
 }
 
-char* parse_route(const char *token){
-    if(
-        strcmp(token, "/home") == EXIT_SUCCESS || 
-        strcmp(token, "/home.html") == EXIT_SUCCESS || 
-        strcmp(token, "/index") == EXIT_SUCCESS || 
-        strcmp(token, "/index.html") == EXIT_SUCCESS || 
-        strcmp(token, "/") == EXIT_SUCCESS
-    ) {
-        return "static/index.html";
-    } else if(
-        strcmp(token, "/contact") == EXIT_SUCCESS || 
-        strcmp(token, "/contact.html") == EXIT_SUCCESS
-    ) {
-        return "static/contact.html";
-    } else if(
-        strcmp(token, "/about") == EXIT_SUCCESS || 
-        strcmp(token, "/about.html") == EXIT_SUCCESS
-    ) {
-        return "static/about.html";
-    } else if(
-        strcmp(token, "/projects") == EXIT_SUCCESS ||
-        strcmp(token, "/projects.html") == EXIT_SUCCESS
-    ) {
-        return "static/projects.html";
-    } else if(strcmp(token, "favicon.ico")) {
-        return "static/facicon.ico";
-    }
+char *parse_route(const char * route) {
+    printf(" route %s\n", route);
+    if(strcmp(route, "/") == EXIT_SUCCESS || strcmp(route, "/home") == EXIT_SUCCESS || strcmp(route, "/index") == EXIT_SUCCESS) return "static/index.html";
+    else if(strcmp(route, "/about") == EXIT_SUCCESS) return "static/about.html";
+    else if (strcmp(route, "/contact") == EXIT_SUCCESS) return "static/contact.html";
+    else if (strcmp(route, "/projects") == EXIT_SUCCESS) return "static/projects.html";
+    else if (strcmp(route, "/facicon.ico") == EXIT_SUCCESS) return "static/facicon.ico";
+    
     return "static/404.html";
 }
 
-int main(){
-    int server_sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if(server_sock_fd < 0) {
-        perror("FAILED TO CREATE SERVER FD");
+void * handle_client(void *arg) {
+    sleep(1);
+    ThreadData *thread_data = (ThreadData *)arg;
+    strcpy(thread_data->filename, parse_route(thread_data->route));
+    printf("parsed filename %s\n", thread_data->filename);
+    FILE *html = fopen(thread_data->filename, "r");
+    if(html == NULL) {
+        printf("FAILED TO OPEN REQUESTED FILE :%s\n", thread_data->filename);
+        perror("FAILED TO OPEN FILE:");
+        close(thread_data->client_fd);
+        free(thread_data);
+        return NULL;
+    }
+    
+    char read_buffer[BUFFER_SIZE] = {0};
+    int read_size = 0;
+    char *header =  "HTTP/1.1 200 OK\r\n"
+           "Content-Type: text/html\r\n"
+           "Connection: close\r\n"
+           "\r\n";
+    send(thread_data->client_fd, header, strlen(header), 0);
+    while((read_size = fread(read_buffer, 1, BUFFER_SIZE, html)) > 0) { // fread(dest, unit_size, total_read_size, *fp)
+        send(thread_data->client_fd, read_buffer, read_size, 0);
+    }
+    shutdown(thread_data->client_fd, SHUT_WR);
+    close(thread_data->client_fd);
+    free(thread_data);
+    return NULL;
+}
+
+int main() {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if(server_fd < 0) {
+        perror("Failed to creae server socket fd:");
         exit(EXIT_FAILURE);
     }
     
@@ -79,40 +102,41 @@ int main(){
         .sin_addr.s_addr = INADDR_ANY,
     };
     
-    if(bind(server_sock_fd, (struct sockaddr *)&server_address, sizeof(server_address)) != EXIT_SUCCESS){
-        perror("FAILED TO BIND:");
+    if(bind(server_fd, (struct sockaddr *)&server_address, sizeof(server_address)) != EXIT_SUCCESS){
+        perror("Failed to bind server");
         exit(EXIT_FAILURE);
     }
     
-    if(listen(server_sock_fd, 10) != EXIT_SUCCESS) {
-        perror("FAILED TO LISTEN:");
+    if(listen(server_fd, BACKLOG) != EXIT_SUCCESS) {
+        perror("Failed to listen:");
         exit(EXIT_FAILURE);
     }
-    printf("listening on port %d\nWaiting for connection\n", PORT);
-    
-    struct sockaddr_in client_address;
-    socklen_t client_len = sizeof(client_address);
-    int client_socket;
-    
-    while(run_server) {
-        client_socket = accept(server_sock_fd, (struct sockaddr *)&client_address, &client_len);
-        if(client_socket < 0) {
-            perror("FAILED TO ACCEPT CONN:");
+    printf("Server running on %d. Waiting for connection...\n", PORT);
+    while (true) {
+        struct sockaddr_in client_address;
+        socklen_t client_length = sizeof(client_address);
+        char request_buffer[BUFFER_SIZE] = {0};
+        int client_fd = accept(server_fd, (struct sockaddr *)&client_address, &client_length);
+        if(client_fd < 0) {
+            perror("Failed to accept client");
             continue;
         }
-        // printf("client connected\n");
-        char request_buffer[BUFFER_SIZE] = {0};
-        recv(client_socket, request_buffer, BUFFER_SIZE, 0);
-        char *token = request_buffer + 4;
-        char *route = strtok(token, " ");
-        // printf("========tokenized========\n%s\n", route);
+        printf("connected ");
+        int bytes = recv(client_fd, request_buffer, BUFFER_SIZE, 0);
+        if (bytes < 0) {
+            close(client_fd);continue;
+        }
+        request_buffer[bytes] = '\0'; // null terminate string at the end of buffer.
         
-        send_HTML(&client_socket, parse_route(token));
-        shutdown(client_socket, SHUT_WR);
-        close(client_socket);
-        // printf("client disconnected\n");
+        ThreadData *thread_data = calloc(1, sizeof(ThreadData));
+        thread_data->client_fd = client_fd;
+ 
+        sscanf(request_buffer, "%s %s %s", thread_data->method, thread_data->route, thread_data->version);
         
+        pthread_t new_conn;
+        pthread_create(&new_conn, NULL, handle_client, (void *)thread_data);
+        // handle_client(thread_data);
     }
-    close(server_sock_fd);
+    
     return EXIT_SUCCESS;
 }
